@@ -243,7 +243,7 @@ pub(crate) fn downscale(
 ///
 /// Reduces width by 2x while applying a binomial blur kernel. The \[1,3,3,1\] weights
 /// approximate a Gaussian and contribute variance=0.75 before the 2x downsampling.
-fn downscale_x(
+pub(crate) fn downscale_x(
     src: &mut Pixmap,
     src_width: u16,
     src_height: u16,
@@ -277,7 +277,7 @@ fn downscale_x(
 ///
 /// Reduces logical height by 2x while applying a binomial blur kernel.
 /// Operates in-place by writing to the beginning of the same buffer.
-fn downscale_y(
+pub(crate) fn downscale_y(
     src: &mut Pixmap,
     src_width: u16,
     src_height: u16,
@@ -344,7 +344,7 @@ pub(crate) fn upscale(
 /// generates two output pixels with different weights based on their distance from
 /// the downsampled pixel's center position.
 /// Operates in-place by processing backwards to avoid overwriting source data.
-fn upscale_x(src: &mut Pixmap, src_width: u16, src_height: u16, edge_mode: EdgeMode) {
+pub(crate) fn upscale_x(src: &mut Pixmap, src_width: u16, src_height: u16, edge_mode: EdgeMode) {
     // Process backwards (right to left) to avoid overwriting source data
     for y in 0..src_height {
         // Maintain sliding window of three pixels: prev, current, next
@@ -376,7 +376,7 @@ fn upscale_x(src: &mut Pixmap, src_width: u16, src_height: u16, edge_mode: EdgeM
 /// generates two output pixels with different weights based on their distance from
 /// the downsampled pixel's center position.
 /// Operates in-place by processing backwards to avoid overwriting source data.
-fn upscale_y(src: &mut Pixmap, src_width: u16, src_height: u16, edge_mode: EdgeMode) {
+pub(crate) fn upscale_y(src: &mut Pixmap, src_width: u16, src_height: u16, edge_mode: EdgeMode) {
     // Process backwards (bottom to top) to avoid overwriting source data
     for x in 0..src_width {
         // Maintain sliding window of three pixels: prev, current, next

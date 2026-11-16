@@ -3,6 +3,9 @@
 
 //! Basic render operations.
 
+mod filter_clip;
+mod gaussian_chain;
+
 #[cfg(feature = "text")]
 use crate::Resources;
 #[cfg(feature = "text")]
@@ -26,7 +29,7 @@ use vello_common::paint::{Paint, PaintType, PremulColor, Tint};
 use vello_common::peniko::FontData;
 use vello_common::peniko::color::palette::css::BLACK;
 use vello_common::peniko::{BlendMode, Fill};
-use vello_common::record::{CommandRecorder, Drawable, LayerClip, LayerProps, PoppedLayer};
+use vello_common::record::{CommandRecorder, Drawable, LayerProps, PoppedLayer};
 use vello_common::render_state::RenderState;
 use vello_common::strip::Strip;
 use vello_common::strip_generator::{GenerationMode, StripGenerator, StripStorage};
@@ -223,6 +226,8 @@ pub struct Scene {
     pub(crate) strip_storage: RefCell<StripStorage>,
     /// Current filter effect applied to individual draw operations.
     filter: Option<Filter>,
+    /// Physical layers belonging to each public logical layer.
+    logical_layer_counts: Vec<u8>,
     /// The command recorder.
     pub(crate) recorder: CommandRecorder<RecordedDraw>,
 }
@@ -249,6 +254,7 @@ impl Scene {
             encoded_paints: vec![],
             strip_storage: RefCell::new(StripStorage::new(GenerationMode::Append)),
             filter: None,
+            logical_layer_counts: Vec::new(),
             recorder: CommandRecorder::new(width, height),
         }
     }
@@ -628,12 +634,12 @@ impl Scene {
         )
     }
 
-    /// Push a new layer with the given properties.
+    /// Push one physical layer (see [`Scene::push_layer`]).
     ///
     /// # Panics
     ///
     /// Panics if `mask` is provided because mask layers are not yet supported.
-    pub fn push_layer(
+    fn push_single_layer(
         &mut self,
         clip_path: Option<&BezPath>,
         blend_mode: Option<BlendMode>,
@@ -647,6 +653,17 @@ impl Scene {
 
         let blend_mode = blend_mode.unwrap_or_default();
         let layer_transform = self.effective_path_transform();
+        // An independent-axis Gaussian reads its source without the ancestor clips, which apply to its output.
+        let isolated_xy = filter
+            .as_ref()
+            .is_some_and(|f| f.single_gaussian_xy().is_some());
+        // The layer compositor consumes parent-coordinate strips. Capture these
+        // before changing viewport/root transforms; never install this as an input clip.
+        let output_clip = if isolated_xy {
+            Some(self.filter_output_clip(clip_path, layer_transform))
+        } else {
+            None
+        };
         let filter_data = filter.map(|filter| FilterData::new(filter, layer_transform));
         let relative_root_transform =
             filter_data
@@ -657,32 +674,18 @@ impl Scene {
                 });
         self.root_transforms.push_root(relative_root_transform);
         if let Some(filter_plan) = &filter_data {
-            self.viewport_state.push_root_viewport(filter_plan);
+            if isolated_xy {
+                self.viewport_state.push_root_viewport_isolated(filter_plan);
+            } else {
+                self.viewport_state.push_root_viewport(filter_plan);
+            }
         }
 
-        let clip_path = clip_path.map(|path| {
-            let mut strip_storage = self.strip_storage.borrow_mut();
-            let strip_start = strip_storage.strips.len();
-            self.viewport_state
-                .with_generator_and_clip(|strip_generator, existing_clip| {
-                    strip_generator.generate_filled_path(
-                        path,
-                        self.render_state.fill_rule,
-                        layer_transform,
-                        self.aliasing_threshold,
-                        &mut strip_storage,
-                        existing_clip.map(|clip| clip.path),
-                    );
-
-                    let strip_range = strip_start..strip_storage.strips.len();
-                    LayerClip {
-                        bbox: strip_bbox(&strip_storage.strips[strip_range.clone()])
-                            .unwrap_or(RectU16::ZERO),
-                        strip_range,
-                        thread_idx: 0,
-                    }
-                })
-        });
+        let clip_path = if isolated_xy {
+            output_clip
+        } else {
+            clip_path.map(|path| self.filter_output_clip(Some(path), layer_transform))
+        };
 
         self.recorder.push_layer(
             LayerProps {
@@ -727,8 +730,8 @@ impl Scene {
         self.push_layer(None, None, None, None, Some(filter));
     }
 
-    /// Pop the last pushed layer.
-    pub fn pop_layer(&mut self) {
+    /// Pop one physical layer.
+    fn pop_single_layer(&mut self) {
         if self.recorder.pop_layer() == PoppedLayer::Filter {
             self.viewport_state.pop_root_viewport();
         }
@@ -866,6 +869,7 @@ impl Scene {
         self.render_state.reset();
         self.aliasing_threshold = None;
         self.recorder.reset(self.width, self.height);
+        self.logical_layer_counts.clear();
         self.filter = None;
     }
 

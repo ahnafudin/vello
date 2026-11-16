@@ -7,7 +7,7 @@ import package::filters::drop_shadow::{
     composite_drop_shadow,
     get_drop_shadow_offset
 };
-import package::filters::scale::{downscale, upscale};
+import package::filters::scale::{downscale, upscale, downscale_axis, upscale_axis};
 import package::helpers::geometry::{pixel_to_ndc, quad_corner};
 import package::helpers::texture::flat_index_to_texture_coord;
 import package::helpers::util::unpack_u16_pair;
@@ -42,6 +42,12 @@ const PASS_BLUR_V: u32 = 5u;
 const PASS_UPSCALE: u32 = 6u;
 const PASS_COMPOSITE_DROP_SHADOW: u32 = 7u;
 const PASS_COLORIZE: u32 = 8u;
+const PASS_DOWNSCALE_X:u32=9u;
+const PASS_UPSCALE_X:u32=10u;
+const PASS_DOWNSCALE_Y:u32=11u;
+const PASS_UPSCALE_Y:u32=12u;
+const PASS_DECODE_LINEAR:u32=13u;
+const PASS_ENCODE_SRGB:u32=14u;
 
 // Keep in sync with FILTER_ATLAS_PADDING in vello_gpu/src/filter.rs.
 const FILTER_ATLAS_PADDING: u32 = 6u;
@@ -185,6 +191,26 @@ fn fs_main(
     }
 
     switch filter_pass_kind {
+        case PASS_DECODE_LINEAR: {
+            let c=sample_source(source_origin,rel_coord);
+            if c.a<=0.0 {return vec4<f32>(0.0);}
+            let s=clamp(c.rgb/c.a,vec3<f32>(0.0),vec3<f32>(1.0));
+            let linear=select(pow((s+0.055)/1.055,vec3<f32>(2.4)),s/12.92,s<=vec3<f32>(0.04045));
+            return vec4<f32>(linear*c.a,c.a);
+        }
+        case PASS_ENCODE_SRGB: {
+            let c=sample_source(source_origin,rel_coord);
+            if c.a<=0.0 {return vec4<f32>(0.0);}
+            let s=clamp(c.rgb/c.a,vec3<f32>(0.0),vec3<f32>(1.0));
+            let encoded=select(1.055*pow(s,vec3<f32>(1.0/2.4))-0.055,s*12.92,s<=vec3<f32>(0.0031308));
+            return vec4<f32>(encoded*c.a,c.a);
+        }
+        case PASS_DOWNSCALE_X, PASS_DOWNSCALE_Y: {
+            return downscale_axis(source_texture,linear_sampler,position,source_origin,dest_origin,filter_pass_kind==PASS_DOWNSCALE_X);
+        }
+        case PASS_UPSCALE_X, PASS_UPSCALE_Y: {
+            return upscale_axis(source_texture,linear_sampler,position,source_origin,dest_origin,filter_pass_kind==PASS_UPSCALE_X);
+        }
         case PASS_COPY: {
             return sample_source(source_origin, rel_coord);
         }

@@ -11,16 +11,21 @@ use crate::filter::drop_shadow::{DropShadow, transform_shadow_params};
 use crate::filter::flood::Flood;
 use crate::filter::gaussian_blur::{GaussianBlur, transform_blur_params};
 use crate::filter::offset::Offset;
+#[cfg(feature = "ahcut")]
+use crate::filter_effects::EdgeMode;
 use crate::filter_effects::{Filter, FilterPrimitive};
 use crate::geometry::{PaddingU16, RectU16};
 use crate::kurbo::{Affine, Rect, Vec2};
 use crate::math::snap_up;
 use crate::tile::Tile;
 use crate::util::RectExt;
+#[cfg(all(feature = "ahcut", not(feature = "std")))]
+use peniko::kurbo::common::FloatFuncs as _;
 
 pub mod drop_shadow;
 pub mod flood;
 pub mod gaussian_blur;
+pub mod gaussian_xy;
 pub mod offset;
 
 /// A filter that has been prepared for rendering.
@@ -95,6 +100,15 @@ impl PreparedFilter {
                 let offset = Offset::new(scaled_dx, scaled_dy);
 
                 Self::Offset(offset)
+            }
+            // This enum has no independent-axis kind: renderers that support one take it from
+            // `PreparedGaussianXY::from_filter` first. Anything else gets the uniform blur of the same
+            // area, as the uniform blur itself approximates a non-uniform transform.
+            #[cfg(feature = "ahcut")]
+            FilterPrimitive::GaussianBlurXY { std_deviation, .. } => {
+                let device = gaussian_xy::transform_sigma_axis_aligned(*std_deviation, transform);
+                let blur = GaussianBlur::new((device[0] * device[1]).sqrt(), EdgeMode::None);
+                Self::GaussianBlur(blur)
             }
             _ => {
                 // Other primitives like Blend, ColorMatrix, ComponentTransfer, etc.

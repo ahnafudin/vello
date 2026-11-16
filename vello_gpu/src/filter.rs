@@ -62,6 +62,7 @@ pub(crate) mod filter_type {
     pub(crate) const FLOOD: u32 = 1;
     pub(crate) const GAUSSIAN_BLUR: u32 = 2;
     pub(crate) const DROP_SHADOW: u32 = 3;
+    pub(crate) const GAUSSIAN_XY: u32 = 4;
 }
 
 pub(crate) mod edge_mode {
@@ -81,6 +82,12 @@ pub(crate) mod pass_kind {
     pub(crate) const UPSCALE: u32 = 6;
     pub(crate) const COMPOSITE_DROP_SHADOW: u32 = 7;
     pub(crate) const COLORIZE: u32 = 8;
+    pub(crate) const DOWNSCALE_X: u32 = 9;
+    pub(crate) const UPSCALE_X: u32 = 10;
+    pub(crate) const DOWNSCALE_Y: u32 = 11;
+    pub(crate) const UPSCALE_Y: u32 = 12;
+    pub(crate) const DECODE_LINEAR: u32 = 13;
+    pub(crate) const ENCODE_SRGB: u32 = 14;
 }
 
 pub(crate) fn edge_mode_to_gpu(mode: EdgeMode) -> u32 {
@@ -441,6 +448,9 @@ impl FilterPassPlan {
                 filter_type::FLOOD => {
                     builder.emit(pass_kind::FLOOD);
                 }
+                filter_type::GAUSSIAN_XY => {
+                    builder.emit_xy_sequence();
+                }
                 filter_type::GAUSSIAN_BLUR => {
                     builder.emit_blur_sequence(filter.gpu_filter.n_decimations());
                 }
@@ -519,6 +529,16 @@ impl<'a> FilterPassBuilder<'a> {
     /// Compute and update source and destination sizes based on the pass kind.
     fn apply_pass_dimensions(&mut self, kind: u32) -> (SizeU16, SizeU16) {
         match kind {
+            pass_kind::DOWNSCALE_X | pass_kind::DOWNSCALE_Y => {
+                let (sw, sh) = self.sizer.current();
+                let (dw, dh) = self.sizer.downscale_axis(kind == pass_kind::DOWNSCALE_X);
+                (SizeU16::from_wh(sw, sh), SizeU16::from_wh(dw, dh))
+            }
+            pass_kind::UPSCALE_X | pass_kind::UPSCALE_Y => {
+                let (sw, sh) = self.sizer.current();
+                let (dw, dh) = self.sizer.upscale_axis();
+                (SizeU16::from_wh(sw, sh), SizeU16::from_wh(dw, dh))
+            }
             pass_kind::DOWNSCALE => {
                 let (sw, sh) = self.sizer.current();
                 let (dw, dh) = self.sizer.downscale();
@@ -565,6 +585,55 @@ impl<'a> FilterPassBuilder<'a> {
 
         self.step += 1;
         self.current_is_original = !self.current_is_original;
+    }
+
+    fn emit_xy_sequence(&mut self) {
+        let data = self.op.gpu_filter.data;
+        let flags = data[9];
+        let active_x = flags & 2 != 0;
+        let active_y = flags & 4 != 0;
+        if !active_x && !active_y {
+            return;
+        }
+        let offset = self.op.filter_data_offset;
+        let linear = flags & 1 != 0;
+        if linear {
+            self.emit(pass_kind::DECODE_LINEAR);
+        }
+        for (active, horizontal, levels, kernel_offset) in [
+            (active_x, true, self.op.gpu_filter.n_decimations(), offset),
+            (active_y, false, data[10] as usize, data[8]),
+        ] {
+            if !active {
+                continue;
+            }
+            self.op.filter_data_offset = kernel_offset;
+            let down = if horizontal {
+                pass_kind::DOWNSCALE_X
+            } else {
+                pass_kind::DOWNSCALE_Y
+            };
+            let up = if horizontal {
+                pass_kind::UPSCALE_X
+            } else {
+                pass_kind::UPSCALE_Y
+            };
+            for _ in 0..levels {
+                self.emit(down);
+            }
+            self.emit(if horizontal {
+                pass_kind::BLUR_H
+            } else {
+                pass_kind::BLUR_V
+            });
+            for _ in 0..levels {
+                self.emit(up);
+            }
+        }
+        self.op.filter_data_offset = offset;
+        if linear {
+            self.emit(pass_kind::ENCODE_SRGB);
+        }
     }
 
     /// Apply the sequences of passes that is needed to create a full Gaussian blur with
@@ -624,6 +693,22 @@ impl FilterContext {
 
     pub(crate) fn push(&mut self, filter_data: &FilterData) -> PreparedGpuFilter {
         let data_offset = self.total_texels();
+        if let Some(blur) = vello_common::filter::gaussian_xy::PreparedGaussianXY::from_filter(
+            &filter_data.filter,
+            &filter_data.transform,
+        ) {
+            let (x, y) = (&blur.x, &blur.y);
+            let mut data: GpuFilterData = GpuGaussianBlur::from(x).into();
+            data.data[0] = (data.data[0] & !31) | filter_type::GAUSSIAN_XY;
+            data.data[8] = data_offset + GpuFilterData::SIZE_TEXELS;
+            data.data[9] = u32::from(blur.linear_rgb)
+                | (u32::from(x.std_deviation > 0.0) << 1)
+                | (u32::from(y.std_deviation > 0.0) << 2);
+            data.data[10] = y.n_decimations as u32;
+            self.filters.push(data);
+            self.filters.push(GpuGaussianBlur::from(y).into());
+            return PreparedGpuFilter { data_offset, data };
+        }
         let prepared = PreparedFilter::new(&filter_data.filter, &filter_data.transform);
         let data = GpuFilterData::from(&prepared);
         self.filters.push(data);
@@ -911,5 +996,69 @@ mod tests {
         let (kernel, size) = compute_gaussian_kernel(2.0);
         assert_eq!(size, 13);
         check_linear_kernel(&kernel, size, 3);
+    }
+}
+
+#[cfg(all(test, feature = "ahcut"))]
+mod xy_plan_tests {
+    use super::*;
+    use crate::schedule::round::{FilterOp, FilterTextureRegions};
+    use crate::target::{LayerTextureId, TextureParity, TextureRegion};
+    use vello_common::filter_effects::{Filter, FilterPrimitive};
+    use vello_common::kurbo::Affine;
+    fn plan(sigma: [f32; 2]) -> Vec<FilterInstanceData> {
+        let mut context = FilterContext::default();
+        let data = context.push(&FilterData::new(
+            Filter::from_primitive(FilterPrimitive::GaussianBlurXY {
+                std_deviation: sigma,
+                linear_rgb: true,
+            }),
+            Affine::IDENTITY,
+        ));
+        let region = |p| TextureRegion {
+            target: LayerTextureId::new(p, 0),
+            rect: RectU16::new(0, 0, 257, 97),
+        };
+        let op = FilterOp {
+            textures: FilterTextureRegions::new(
+                region(TextureParity::Odd),
+                region(TextureParity::Even),
+            ),
+            filter_data_offset: data.data_offset,
+            gpu_filter: data.data,
+        };
+        let mut plan = FilterPassPlan::default();
+        plan.init([op], SizeU16::new(512));
+        plan.steps().flatten().copied().collect()
+    }
+    #[test]
+    fn zero_axis_emits_no_orthogonal_resampling_or_blur() {
+        for (sigma, forbidden) in [
+            (
+                [12.0, 0.0],
+                [
+                    pass_kind::DOWNSCALE_Y,
+                    pass_kind::UPSCALE_Y,
+                    pass_kind::BLUR_V,
+                ],
+            ),
+            (
+                [0.0, 12.0],
+                [
+                    pass_kind::DOWNSCALE_X,
+                    pass_kind::UPSCALE_X,
+                    pass_kind::BLUR_H,
+                ],
+            ),
+        ] {
+            let steps = plan(sigma);
+            assert!(!steps.is_empty());
+            assert!(
+                steps
+                    .iter()
+                    .all(|p| !forbidden.contains(&p.filter_pass_kind))
+            );
+        }
+        assert!(plan([0.0, 0.0]).is_empty());
     }
 }

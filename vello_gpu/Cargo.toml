@@ -55,6 +55,8 @@ wgpu = ["dep:wgpu", "dep:vello_gpu_shaders"]
 # please disable this crate's default features, enable its "wgpu" feature, then depend on wgpu directly
 # with the features which you need enabled.
 wgpu_default = ["wgpu", "wgpu/default"]
+# Independent-axis Gaussian blur and serial Gaussian chains (see vello_common's `ahcut`). Off by default.
+ahcut = ["vello_common/ahcut"]
 # Add support for text rendering.
 text = ["dep:glifo", "glifo/std"]
 probe = ["vello_common/probe"]

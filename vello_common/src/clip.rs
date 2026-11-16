@@ -172,6 +172,8 @@ struct ClipFrame {
     source_shift: Affine,
     /// The current revision of the clipping state.
     clip_revision: u64,
+    /// Ancestor clips before this index apply only to the filter output.
+    source_clip_start: usize,
 }
 
 // This struct implements an additional piece of logic to make non-isolated clips work properly
@@ -236,6 +238,31 @@ impl ClipState {
         source_shift: (u16, u16),
         strip_generator: &mut StripGenerator,
     ) {
+        self.push_root_viewport_inner(source_shift, strip_generator, false);
+    }
+
+    /// Open a filter source viewport without inheriting ancestor output clips.
+    pub fn push_root_viewport_isolated(
+        &mut self,
+        source_shift: (u16, u16),
+        strip_generator: &mut StripGenerator,
+    ) {
+        self.push_root_viewport_inner(source_shift, strip_generator, true);
+    }
+
+    fn push_root_viewport_inner(
+        &mut self,
+        source_shift: (u16, u16),
+        strip_generator: &mut StripGenerator,
+        isolated: bool,
+    ) {
+        let source_clip_start = if isolated {
+            self.raw_clips.len()
+        } else {
+            self.frames
+                .last()
+                .map_or(0, |frame| frame.source_clip_start)
+        };
         let parent_context = core::mem::replace(&mut self.context, self.context_pool.take());
         let source_shift =
             Affine::translate((f64::from(source_shift.0), f64::from(source_shift.1)))
@@ -244,6 +271,7 @@ impl ClipState {
             parent_context,
             source_shift,
             clip_revision: self.revision,
+            source_clip_start,
         });
         self.rebuild_context(strip_generator);
     }
@@ -332,7 +360,11 @@ impl ClipState {
     fn rebuild_context(&mut self, strip_generator: &mut StripGenerator) {
         self.context.reset();
         let active_shift = self.active_shift();
-        for raw_clip in &self.raw_clips {
+        let start = self
+            .frames
+            .last()
+            .map_or(0, |frame| frame.source_clip_start);
+        for raw_clip in &self.raw_clips[start..] {
             match raw_clip {
                 RawClip::Path {
                     elements,
@@ -1244,5 +1276,26 @@ mod tests {
 
             self.add_row_end(strip_y, x, true).finish()
         }
+    }
+}
+
+#[cfg(test)]
+mod isolated_filter_clip_tests {
+    use super::*;
+    use fearless_simd::Level;
+    #[test]
+    fn isolated_filter_source_ignores_inherited_clip_and_restores_it() {
+        let mut parent = StripGenerator::new(100, 100, Level::baseline());
+        let mut source = StripGenerator::new(140, 140, Level::baseline());
+        let mut clips = ClipState::new();
+        let rect = Rect::new(20.0, 12.0, 80.0, 90.0);
+        clips.push_clip_rect(&rect, &mut parent);
+        clips.push_root_viewport_isolated((20, 20), &mut source);
+        assert!(clips.get().is_none());
+        clips.push_clip_rect(&Rect::new(25.0, 15.0, 75.0, 85.0), &mut source);
+        assert!(clips.get().is_some());
+        clips.pop_clip();
+        clips.pop_root_viewport(&mut parent);
+        assert_eq!(clips.get().unwrap().shape, ClipShape::AxisAlignedRect(rect));
     }
 }

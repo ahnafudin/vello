@@ -205,6 +205,25 @@ impl DecimationSizer {
         (self.width, self.height)
     }
 
+    /// Downsample one axis only, for blurs whose axes have different plans.
+    pub fn downscale_axis(&mut self, horizontal: bool) -> (u16, u16) {
+        self.dim_stack.push((self.width, self.height));
+        if horizontal {
+            self.width = self.width.div_ceil(2);
+        } else {
+            self.height = self.height.div_ceil(2);
+        }
+        self.current()
+    }
+    /// Undo the last [`downscale_axis`](Self::downscale_axis), restoring the exact preceding dimensions including
+    /// an odd size. Without a preceding downscale the dimensions stay as they are.
+    pub fn upscale_axis(&mut self) -> (u16, u16) {
+        if let Some(previous) = self.dim_stack.pop() {
+            (self.width, self.height) = previous;
+        }
+        self.current()
+    }
+
     /// Apply a new upscale operation.
     #[inline]
     pub fn upscale(&mut self) -> (u16, u16) {
@@ -333,5 +352,21 @@ mod tests {
         let mut sizer = DecimationSizer::new(100, 50);
         assert_eq!(sizer.downscale(), (50, 25));
         assert_eq!(sizer.upscale(), (100, 50));
+    }
+}
+
+#[cfg(test)]
+mod independent_axis_sizer_tests {
+    use super::DecimationSizer;
+    #[test]
+    fn odd_dimensions_leave_the_other_axis_unchanged() {
+        for horizontal in [true, false] {
+            let mut s = DecimationSizer::new(257, 97);
+            assert_eq!(
+                s.downscale_axis(horizontal),
+                if horizontal { (129, 97) } else { (257, 49) }
+            );
+            assert_eq!(s.upscale_axis(), (257, 97));
+        }
     }
 }

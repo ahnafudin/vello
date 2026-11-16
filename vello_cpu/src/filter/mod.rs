@@ -12,11 +12,13 @@ pub(crate) mod context;
 mod drop_shadow;
 mod flood;
 mod gaussian_blur;
+mod gaussian_xy;
 mod offset;
 mod shift;
 
 use context::ScratchBuffer;
 use vello_common::filter::PreparedFilter;
+use vello_common::filter::gaussian_xy::PreparedGaussianXY;
 use vello_common::filter_effects::Filter;
 use vello_common::kurbo::Affine;
 use vello_common::pixmap::Pixmap;
@@ -64,6 +66,10 @@ pub(crate) fn filter_lowp(
     filter_scratch: &mut ScratchBuffer,
     transform: Affine,
 ) {
+    if let Some(blur) = PreparedGaussianXY::from_filter(filter, &transform) {
+        blur.execute_lowp(pixmap, filter_scratch);
+        return;
+    }
     let prepared_filter = PreparedFilter::new(filter, &transform);
 
     match prepared_filter {
@@ -102,6 +108,10 @@ pub(crate) fn filter_highp(
     filter_scratch: &mut ScratchBuffer,
     transform: Affine,
 ) {
+    if let Some(blur) = PreparedGaussianXY::from_filter(filter, &transform) {
+        blur.execute_highp(pixmap, filter_scratch);
+        return;
+    }
     let prepared_filter = PreparedFilter::new(filter, &transform);
 
     match prepared_filter {

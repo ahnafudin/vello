@@ -50,3 +50,23 @@ fn upscale(
 
     return textureSampleLevel(source_texture, linear_sampler, (source_texel + 0.5) / source_texture_size, 0.0);
 }
+
+// Axis-only resampling preserves every texel along a zero-sigma axis.
+fn downscale_axis(source_texture:texture_2d<f32>,linear_sampler:sampler,position:vec4<f32>,source_origin:vec2<u32>,dest_origin:vec2<u32>,horizontal:bool)->vec4<f32> {
+    let axis=select(vec2<f32>(0.0,1.0),vec2<f32>(1.0,0.0),horizontal);
+    let rel=vec2<f32>(vec2<i32>(vec2<u32>(position.xy)-dest_origin));
+    let base=vec2<f32>(source_origin)+rel*(vec2<f32>(1.0)+axis);
+    let size=vec2<f32>(textureDimensions(source_texture));
+    let a=textureSampleLevel(source_texture,linear_sampler,(base-axis*0.25+0.5)/size,0.0);
+    let b=textureSampleLevel(source_texture,linear_sampler,(base+axis*1.25+0.5)/size,0.0);
+    return (a+b)*0.5;
+}
+fn upscale_axis(source_texture:texture_2d<f32>,linear_sampler:sampler,position:vec4<f32>,source_origin:vec2<u32>,dest_origin:vec2<u32>,horizontal:bool)->vec4<f32> {
+    let rel=vec2<u32>(position.xy)-dest_origin;
+    let axis=select(vec2<f32>(0.0,1.0),vec2<f32>(1.0,0.0),horizontal);
+    let value=select(rel.y,rel.x,horizontal);
+    let base=vec2<f32>(rel)-axis*f32(value)+axis*f32(value/2u);
+    let phase=select(-0.25,0.25,value%2u==1u);
+    let coord=vec2<f32>(source_origin)+base+axis*phase;
+    return textureSampleLevel(source_texture,linear_sampler,(coord+0.5)/vec2<f32>(textureDimensions(source_texture)),0.0);
+}
