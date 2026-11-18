@@ -19,8 +19,6 @@ use crate::kurbo::{Affine, Rect, Vec2};
 use crate::math::snap_up;
 use crate::tile::Tile;
 use crate::util::RectExt;
-#[cfg(all(feature = "ahcut", not(feature = "std")))]
-use peniko::kurbo::common::FloatFuncs as _;
 
 pub mod drop_shadow;
 pub mod flood;
@@ -55,11 +53,13 @@ impl PreparedFilter {
                 Self::Flood(flood)
             }
             FilterPrimitive::GaussianBlur {
-                std_deviation,
+                std_deviation_x,
+                std_deviation_y,
                 edge_mode,
             } => {
-                let scaled_std_dev = transform_blur_params(*std_deviation, transform);
-                let blur = GaussianBlur::new(scaled_std_dev, *edge_mode);
+                let (scaled_std_dev_x, scaled_std_dev_y) =
+                    transform_blur_params(*std_deviation_x, *std_deviation_y, transform);
+                let blur = GaussianBlur::new(scaled_std_dev_x, scaled_std_dev_y, *edge_mode);
                 Self::GaussianBlur(blur)
             }
             FilterPrimitive::DropShadow {
@@ -101,14 +101,12 @@ impl PreparedFilter {
 
                 Self::Offset(offset)
             }
-            // This enum has no independent-axis kind: renderers that support one take it from
-            // `PreparedGaussianXY::from_filter` first. Anything else gets the uniform blur of the same
-            // area, as the uniform blur itself approximates a non-uniform transform.
+            // This enum has no kind for the colour space: a renderer that blurs in linear light takes the blur
+            // from `PreparedGaussianXY::from_filter` first. Anything else gets the same axis blur in encoded sRGB.
             #[cfg(feature = "ahcut")]
             FilterPrimitive::GaussianBlurXY { std_deviation, .. } => {
                 let device = gaussian_xy::transform_sigma_axis_aligned(*std_deviation, transform);
-                let blur = GaussianBlur::new((device[0] * device[1]).sqrt(), EdgeMode::None);
-                Self::GaussianBlur(blur)
+                Self::GaussianBlur(GaussianBlur::new(device[0], device[1], EdgeMode::None))
             }
             _ => {
                 // Other primitives like Blend, ColorMatrix, ComponentTransfer, etc.

@@ -1,15 +1,13 @@
 // Copyright 2026 the Vello Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Independent-axis Gaussian blur on the CPU: each axis runs its own decimation plan with one-axis resampling
-//! and a one-axis convolution, optionally in linear-light premultiplied colour.
+//! Independent-axis Gaussian blur on the CPU: each axis runs on its own through the blur of this crate,
+//! optionally in linear-light premultiplied colour.
 
 use super::FilterEffect;
-use super::gaussian_blur::{
-    convolve_x, convolve_y, downscale_x, downscale_y, upscale_x, upscale_y,
-};
+use super::gaussian_blur::apply_blur;
 use crate::filter::context::ScratchBuffer;
-use vello_common::filter::gaussian_blur::{DecimationSizer, GaussianBlur};
+use vello_common::filter::gaussian_blur::GaussianBlur;
 use vello_common::filter::gaussian_xy::PreparedGaussianXY;
 use vello_common::filter_effects::EdgeMode;
 use vello_common::peniko::color::PremulRgba8;
@@ -19,14 +17,14 @@ use vello_common::pixmap::Pixmap;
 
 impl FilterEffect for PreparedGaussianXY {
     fn execute_lowp(&self, pixmap: &mut Pixmap, filter_scratch: &mut ScratchBuffer) {
-        if self.x.std_deviation <= 0.0 && self.y.std_deviation <= 0.0 {
+        if self.blur.std_deviation_x <= 0.0 && self.blur.std_deviation_y <= 0.0 {
             return;
         }
         if self.linear_rgb {
             map_colors(pixmap, srgb_to_linear);
         }
-        blur_axis(pixmap, filter_scratch, &self.x, true);
-        blur_axis(pixmap, filter_scratch, &self.y, false);
+        blur_axis(pixmap, filter_scratch, &self.blur, true);
+        blur_axis(pixmap, filter_scratch, &self.blur, false);
         if self.linear_rgb {
             map_colors(pixmap, linear_to_srgb);
         }
@@ -48,12 +46,17 @@ fn blur_axis(
     blur: &GaussianBlur,
     horizontal: bool,
 ) {
-    if blur.std_deviation <= 0.0 {
+    let (sigma, levels) = if horizontal {
+        (blur.std_deviation_x, blur.n_decimations_x)
+    } else {
+        (blur.std_deviation_y, blur.n_decimations_y)
+    };
+    if sigma <= 0.0 {
         return;
     }
     let (width, height) = (pixmap.width(), pixmap.height());
     let length = u32::from(if horizontal { width } else { height });
-    let step = 1_u32 << blur.n_decimations.min(16);
+    let step = 1_u32 << levels.min(16);
     let Ok(padded) = u16::try_from(length.div_ceil(step) * step) else {
         return;
     };
@@ -71,42 +74,36 @@ fn blur_axis(
     copy_region(&work, pixmap, width, height);
 }
 
-/// Downsamples one axis only, convolves along it, and upsamples it back, in place.
+/// Decimates one axis only, convolves along it, and restores it, in place: the crate's blur with an identity plan
+/// for the other axis.
 fn blur_axis_in_place(
     pixmap: &mut Pixmap,
     filter_scratch: &mut ScratchBuffer,
     blur: &GaussianBlur,
     horizontal: bool,
 ) {
-    let kernel = &blur.kernel[..usize::from(blur.kernel_size)];
-    let radius = (kernel.len() / 2) as u8;
-    let edge_mode = EdgeMode::None;
+    const IDENTITY: [f32; 1] = [1.0];
     let scratch = filter_scratch.get_scratch_buffer(pixmap.width(), pixmap.height());
-    let mut sizer = DecimationSizer::new(pixmap.width(), pixmap.height());
-    for _ in 0..blur.n_decimations {
-        let (w, h) = sizer.current();
-        if horizontal {
-            downscale_x(pixmap, w, h, w.div_ceil(2), edge_mode);
-        } else {
-            downscale_y(pixmap, w, h, h.div_ceil(2), edge_mode);
-        }
-        sizer.downscale_axis(horizontal);
-    }
-    let (w, h) = sizer.current();
     if horizontal {
-        convolve_x(pixmap, scratch, w, h, kernel, radius, edge_mode);
+        apply_blur(
+            pixmap,
+            scratch,
+            blur.n_decimations_x,
+            0,
+            blur.kernel_x(),
+            &IDENTITY,
+            EdgeMode::None,
+        );
     } else {
-        convolve_y(pixmap, scratch, w, h, kernel, radius, edge_mode);
-    }
-    copy_region(scratch, pixmap, w, h);
-    for _ in 0..blur.n_decimations {
-        let (w, h) = sizer.current();
-        if horizontal {
-            upscale_x(pixmap, w, h, edge_mode);
-        } else {
-            upscale_y(pixmap, w, h, edge_mode);
-        }
-        sizer.upscale_axis();
+        apply_blur(
+            pixmap,
+            scratch,
+            0,
+            blur.n_decimations_y,
+            &IDENTITY,
+            blur.kernel_y(),
+            EdgeMode::None,
+        );
     }
 }
 
@@ -118,6 +115,7 @@ fn copy_region(src: &Pixmap, dst: &mut Pixmap, width: u16, height: u16) {
         }
     }
 }
+
 /// Applies `transfer` to the colour of every pixel, keeping premultiplication: unpremultiply, map, premultiply.
 fn map_colors(pixmap: &mut Pixmap, transfer: fn(f32) -> f32) {
     for pixel in pixmap.data_mut() {

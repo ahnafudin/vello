@@ -1,7 +1,7 @@
 // Copyright 2026 the Vello Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Independent-axis Gaussian blur: mapping user-space standard deviations through a transform, and the prepared
-//! per-axis plan that renderers execute.
+//! Independent-axis Gaussian blur with a colour space: mapping user-space standard deviations through a
+//! transform, and the prepared blur that renderers execute.
 
 use crate::filter::gaussian_blur::GaussianBlur;
 use crate::filter_effects::{EdgeMode, Filter};
@@ -69,13 +69,11 @@ pub fn transform_sigma_axis_aligned(sigma: [f32; 2], transform: &Affine) -> [f32
     [sx, sy].map(|v| if v.is_finite() { v as f32 } else { 0.0 })
 }
 
-/// A prepared independent-axis Gaussian blur in device space: one decimated plan per axis.
+/// A prepared independent-axis Gaussian blur in device space.
 #[derive(Debug)]
 pub struct PreparedGaussianXY {
-    /// The horizontal pass.
-    pub x: GaussianBlur,
-    /// The vertical pass.
-    pub y: GaussianBlur,
+    /// The blur, with its decimation plan and kernel per axis.
+    pub blur: GaussianBlur,
     /// Blur in linear-light premultiplied colour instead of encoded sRGB.
     pub linear_rgb: bool,
 }
@@ -85,8 +83,7 @@ impl PreparedGaussianXY {
     pub fn new(sigma: [f32; 2], linear_rgb: bool, transform: &Affine) -> Self {
         let device = transform_sigma_axis_aligned(sigma, transform);
         Self {
-            x: GaussianBlur::new(device[0], EdgeMode::None),
-            y: GaussianBlur::new(device[1], EdgeMode::None),
+            blur: GaussianBlur::new(device[0], device[1], EdgeMode::None),
             linear_rgb,
         }
     }
