@@ -92,6 +92,15 @@ impl ViewportState {
 
     /// Push a new root viewport.
     pub fn push_root_viewport(&mut self, filter_data: &FilterData) {
+        self.push_root_viewport_inner(filter_data, false);
+    }
+
+    /// Open an isolated filter input viewport; ancestor clips belong to its compositor.
+    pub fn push_root_viewport_isolated(&mut self, filter_data: &FilterData) {
+        self.push_root_viewport_inner(filter_data, true);
+    }
+
+    fn push_root_viewport_inner(&mut self, filter_data: &FilterData, isolated: bool) {
         let padding = filter_data.source_padding;
         let width = self
             .strip_generator
@@ -108,8 +117,13 @@ impl ViewportState {
         let parent_generator = core::mem::replace(&mut self.strip_generator, filter_generator);
         self.strip_generator_stack.push(parent_generator);
 
-        self.clip_state
-            .push_root_viewport(filter_data.source_shift(), &mut self.strip_generator);
+        if isolated {
+            self.clip_state
+                .push_root_viewport_isolated(filter_data.source_shift(), &mut self.strip_generator);
+        } else {
+            self.clip_state
+                .push_root_viewport(filter_data.source_shift(), &mut self.strip_generator);
+        }
     }
 
     /// Pop the last root viewport.

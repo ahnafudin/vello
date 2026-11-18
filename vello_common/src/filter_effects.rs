@@ -55,6 +55,9 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use smallvec::SmallVec;
 
+mod gaussian_chain;
+pub use gaussian_chain::GaussianChainError;
+
 /// The main filter system.
 ///
 /// A filter combines a graph of filter primitives with optional spatial bounds.
@@ -147,6 +150,15 @@ impl Filter {
 /// primitives can be used as inputs to others. Each primitive has a unique `FilterId`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FilterGraph {
+    /// The input links each primitive was added with.
+    #[cfg(feature = "ahcut")]
+    inputs: SmallVec<[Option<FilterInputs>; 1]>,
+    /// The output crop of each stage of a serial Gaussian chain (see `Filter::gaussian_chain`).
+    #[cfg(feature = "ahcut")]
+    gaussian_regions: Option<SmallVec<[Rect; 2]>>,
+    /// The final crop of a serial Gaussian chain.
+    #[cfg(feature = "ahcut")]
+    gaussian_final_region: Option<Rect>,
     /// All filter primitives in the graph, stored in insertion order.
     pub primitives: SmallVec<[FilterPrimitive; 1]>,
     /// The final output filter ID whose result is the output of this graph.
@@ -172,6 +184,12 @@ impl FilterGraph {
             primitives: SmallVec::new(),
             output: FilterId(0),
             next_id: 0,
+            #[cfg(feature = "ahcut")]
+            inputs: SmallVec::new(),
+            #[cfg(feature = "ahcut")]
+            gaussian_regions: None,
+            #[cfg(feature = "ahcut")]
+            gaussian_final_region: None,
             filter_expansion: Rect::ZERO,
             source_expansion: Rect::ZERO,
         }
@@ -189,6 +207,8 @@ impl FilterGraph {
         self.source_expansion = self.source_expansion.union(primitive.source_expansion());
 
         self.primitives.push(primitive);
+        #[cfg(feature = "ahcut")]
+        self.inputs.push(_inputs);
 
         id
     }
@@ -368,6 +388,19 @@ pub enum FilterPrimitive {
     Flood {
         /// Fill color with alpha channel.
         color: AlphaColor<Srgb>,
+    },
+    /// Gaussian blur filter with independent standard deviations for the x and y axes (the two-number
+    /// `stdDeviation` of SVG), in user space.
+    ///
+    /// Under a transform that keeps the axes (scales, translations, quarter turns) it is exact; under a rotation
+    /// or skew the renderers use the closest axis-aligned Gaussian.
+    #[cfg(feature = "ahcut")]
+    GaussianBlurXY {
+        /// Standard deviations for the x and y axes; each must be non-negative.
+        std_deviation: [f32; 2],
+        /// Blur in linear-light premultiplied colour (`color-interpolation-filters: linearRGB`) rather than in
+        /// encoded sRGB.
+        linear_rgb: bool,
     },
     /// Gaussian blur filter.
     ///
@@ -583,6 +616,12 @@ impl FilterPrimitive {
     /// The filter expansion of the primitive, see [`Filter::filter_expansion`].
     pub fn filter_expansion(&self) -> Rect {
         match self {
+            #[cfg(feature = "ahcut")]
+            Self::GaussianBlurXY { std_deviation, .. } => {
+                let rx = blur_radius(std_deviation[0]);
+                let ry = blur_radius(std_deviation[1]);
+                Rect::new(-rx, -ry, rx, ry)
+            }
             Self::GaussianBlur {
                 std_deviation_x,
                 std_deviation_y,

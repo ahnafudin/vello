@@ -62,6 +62,8 @@ const PASS_DOWNSCALE_X: u32 = 9u;
 const PASS_DOWNSCALE_Y: u32 = 10u;
 const PASS_UPSCALE_X: u32 = 11u;
 const PASS_UPSCALE_Y: u32 = 12u;
+const PASS_DECODE_LINEAR: u32 = 13u;
+const PASS_ENCODE_SRGB: u32 = 14u;
 
 // Keep in sync with FILTER_ATLAS_PADDING in vello_gpu/src/filter.rs.
 const FILTER_ATLAS_PADDING: u32 = 6u;
@@ -74,7 +76,9 @@ const FILTER_ATLAS_PADDING: u32 = 6u;
 //   bit  [13]    = composite_original (only for drop shadows), only read on the CPU side.
 //   bits [14:17] = n_decimations_y (4 bits, only for blur filters), only read on the CPU side.
 //   bits [18:19] = n_linear_taps_y (2 bits, only for blur filters)
-//   bits [20:32] = reserved for future use
+//   bits [20:29] = reserved for future use
+//   bit  [30]    = each axis blurs on its own (independent-axis Gaussian), only read on the CPU side.
+//   bit  [31]    = blur in linear light (independent-axis Gaussian), only read on the CPU side.
 
 fn load_filter_texel(texel_offset: u32, texel_index: u32) -> vec4<u32> {
     let w = textureDimensions(filter_data).x;
@@ -358,6 +362,33 @@ fn fs_main(
                     dest_origin,
                     vec2<bool>(false, true),
                 );
+        }
+        // The two conversions around a blur in linear light. Colour is premultiplied on both sides.
+        case PASS_DECODE_LINEAR {
+            let color = sample_source(source_origin, rel_coord);
+            if color.a <= 0.0 {
+                return vec4<f32>(0.0);
+            }
+            let encoded = clamp(color.rgb / color.a, vec3<f32>(0.0), vec3<f32>(1.0));
+            let linear = select(
+                    pow((encoded + 0.055) / 1.055, vec3<f32>(2.4)),
+                    encoded / 12.92,
+                    encoded <= vec3<f32>(0.04045),
+                );
+            return vec4<f32>(linear * color.a, color.a);
+        }
+        case PASS_ENCODE_SRGB {
+            let color = sample_source(source_origin, rel_coord);
+            if color.a <= 0.0 {
+                return vec4<f32>(0.0);
+            }
+            let linear = clamp(color.rgb / color.a, vec3<f32>(0.0), vec3<f32>(1.0));
+            let encoded = select(
+                    1.055 * pow(linear, vec3<f32>(1.0 / 2.4)) - 0.055,
+                    linear * 12.92,
+                    linear <= vec3<f32>(0.0031308),
+                );
+            return vec4<f32>(encoded * color.a, color.a);
         }
         // Shouldn't be reached.
         default { return vec4<f32>(0.0); }

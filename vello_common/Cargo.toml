@@ -38,6 +38,9 @@ std = ["peniko/std", "fearless_simd/std"]
 libm = ["peniko/libm", "dep:libm", "fearless_simd/libm"]
 # Allow loading Pixmap from PNG, and drawing png glyphs.
 png = ["std", "dep:png"]
+# Independent-axis Gaussian blur (`FilterPrimitive::GaussianBlurXY`) and serial Gaussian chains with per-stage
+# crops (`Filter::gaussian_chain`). Off by default.
+ahcut = []
 # Add helpers for drawing a probe scene.
 probe = []
 # Enable multi-threaded rendering.

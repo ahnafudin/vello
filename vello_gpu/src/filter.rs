@@ -13,6 +13,7 @@ use vello_common::filter::flood::Flood;
 use vello_common::filter::gaussian_blur::{
     DecimationAxes, DecimationSizer, GaussianBlur, MAX_KERNEL_SIZE, decimation_levels,
 };
+use vello_common::filter::gaussian_xy::PreparedGaussianXY;
 use vello_common::filter::offset::Offset;
 use vello_common::filter::{FilterData, PreparedFilter};
 use vello_common::filter_effects::EdgeMode;
@@ -37,6 +38,11 @@ const FILTER_SIZE_BYTES: usize = 64;
 const FILTER_SIZE_U32: usize = FILTER_SIZE_BYTES / 4;
 const COMPOSITE_ORIGINAL_SHIFT: u32 = 13;
 const COMPOSITE_ORIGINAL_MASK: u32 = 1 << COMPOSITE_ORIGINAL_SHIFT;
+/// Header bit of an independent-axis Gaussian (`FilterPrimitive::GaussianBlurXY`), which is encoded as a
+/// Gaussian blur: each axis is decimated, blurred and restored on its own. Only read on the CPU side.
+const XY_SEQUENCE_MASK: u32 = 1 << 30;
+/// Header bit of an independent-axis Gaussian that blurs in linear light. Only read on the CPU side.
+const XY_LINEAR_MASK: u32 = 1 << 31;
 
 const _: () = assert!(
     size_of::<GpuFilterData>() == FILTER_SIZE_BYTES,
@@ -87,6 +93,10 @@ pub(crate) mod pass_kind {
     pub(crate) const DOWNSCALE_Y: u32 = 10;
     pub(crate) const UPSCALE_X: u32 = 11;
     pub(crate) const UPSCALE_Y: u32 = 12;
+    /// Encoded sRGB to linear light, keeping premultiplication.
+    pub(crate) const DECODE_LINEAR: u32 = 13;
+    /// Linear light to encoded sRGB, keeping premultiplication.
+    pub(crate) const ENCODE_SRGB: u32 = 14;
 }
 
 pub(crate) fn edge_mode_to_gpu(mode: EdgeMode) -> u32 {
@@ -132,6 +142,11 @@ const fn pack_header_with_gaussian_params(
 const _: () = assert!(
     pack_header_with_gaussian_params(31, 3, 15, 3, 15, 3) & COMPOSITE_ORIGINAL_MASK == 0,
     "Gaussian filter parameters overlap the composite_original bit"
+);
+const _: () = assert!(
+    pack_header_with_gaussian_params(31, 3, 15, 3, 15, 3) & (XY_SEQUENCE_MASK | XY_LINEAR_MASK)
+        == 0,
+    "Gaussian filter parameters overlap the independent-axis bits"
 );
 
 // To a large degree, the vello_gpu implementation of gaussian blur follows the one in vello_cpu.
@@ -375,6 +390,16 @@ impl GpuFilterData {
         (self.data[0] >> 18) & 0x3 != 0
     }
 
+    /// Whether the blur runs axis by axis (an independent-axis Gaussian).
+    fn xy_sequence(&self) -> bool {
+        self.data[0] & XY_SEQUENCE_MASK != 0
+    }
+
+    /// Whether an independent-axis Gaussian blurs in linear light.
+    fn xy_linear(&self) -> bool {
+        self.data[0] & XY_LINEAR_MASK != 0
+    }
+
     pub(crate) fn composite_original(&self) -> bool {
         self.data[0] & COMPOSITE_ORIGINAL_MASK != 0
     }
@@ -485,7 +510,11 @@ impl FilterPassPlan {
                     builder.emit(pass_kind::FLOOD);
                 }
                 filter_type::GAUSSIAN_BLUR => {
-                    builder.emit_blur_sequence(&filter.gpu_filter);
+                    if filter.gpu_filter.xy_sequence() {
+                        builder.emit_xy_sequence(&filter.gpu_filter);
+                    } else {
+                        builder.emit_blur_sequence(&filter.gpu_filter);
+                    }
                 }
                 filter_type::DROP_SHADOW => {
                     builder.emit(pass_kind::OFFSET);
@@ -645,6 +674,48 @@ impl<'a> FilterPassBuilder<'a> {
         }
     }
 
+    /// Apply the passes of an independent-axis Gaussian: each axis that blurs is decimated, convolved and
+    /// restored before the other, between the colour space conversions when it blurs in linear light.
+    fn emit_xy_sequence(&mut self, filter: &GpuFilterData) {
+        if !filter.blurs_x() && !filter.blurs_y() {
+            return;
+        }
+        let linear = filter.xy_linear();
+        if linear {
+            self.emit(pass_kind::DECODE_LINEAR);
+        }
+        for (blurs, levels, down, blur, up) in [
+            (
+                filter.blurs_x(),
+                filter.n_decimations_x(),
+                pass_kind::DOWNSCALE_X,
+                pass_kind::BLUR_H,
+                pass_kind::UPSCALE_X,
+            ),
+            (
+                filter.blurs_y(),
+                filter.n_decimations_y(),
+                pass_kind::DOWNSCALE_Y,
+                pass_kind::BLUR_V,
+                pass_kind::UPSCALE_Y,
+            ),
+        ] {
+            if !blurs {
+                continue;
+            }
+            for _ in 0..levels {
+                self.emit(down);
+            }
+            self.emit(blur);
+            for _ in 0..levels {
+                self.emit(up);
+            }
+        }
+        if linear {
+            self.emit(pass_kind::ENCODE_SRGB);
+        }
+    }
+
     fn ensure_result_in_original(&mut self) {
         if !self.current_is_original {
             self.emit(pass_kind::COPY);
@@ -672,6 +743,17 @@ impl FilterContext {
 
     pub(crate) fn push(&mut self, filter_data: &FilterData) -> PreparedGpuFilter {
         let data_offset = self.total_texels();
+        if let Some(xy) =
+            PreparedGaussianXY::from_filter(&filter_data.filter, &filter_data.transform)
+        {
+            let mut data: GpuFilterData = GpuGaussianBlur::from(&xy.blur).into();
+            data.data[0] |= XY_SEQUENCE_MASK;
+            if xy.linear_rgb {
+                data.data[0] |= XY_LINEAR_MASK;
+            }
+            self.filters.push(data);
+            return PreparedGpuFilter { data_offset, data };
+        }
         let prepared = PreparedFilter::new(&filter_data.filter, &filter_data.transform);
         let data = GpuFilterData::from(&prepared);
         self.filters.push(data);
@@ -975,5 +1057,94 @@ mod tests {
         let (kernel, size) = compute_gaussian_kernel(2.0);
         assert_eq!(size, 13);
         check_linear_kernel(&kernel, size, 3);
+    }
+}
+
+#[cfg(all(test, feature = "ahcut"))]
+mod xy_plan_tests {
+    use super::*;
+    use crate::schedule::round::FilterTextureRegions;
+    use crate::target::{LayerTextureId, TextureParity, TextureRegion};
+    use vello_common::filter_effects::{Filter, FilterPrimitive};
+    use vello_common::kurbo::Affine;
+
+    fn plan(sigma: [f32; 2], linear_rgb: bool) -> Vec<u32> {
+        let mut context = FilterContext::default();
+        let data = context.push(&FilterData::new(
+            Filter::from_primitive(FilterPrimitive::GaussianBlurXY {
+                std_deviation: sigma,
+                linear_rgb,
+            }),
+            Affine::IDENTITY,
+        ));
+        let region = |parity| TextureRegion {
+            target: LayerTextureId::new(parity, 0),
+            rect: RectU16::new(0, 0, 257, 97),
+        };
+        let op = FilterOp {
+            textures: FilterTextureRegions::new(
+                region(TextureParity::Odd),
+                region(TextureParity::Even),
+            ),
+            filter_data_offset: data.data_offset,
+            gpu_filter: data.data,
+        };
+        let mut plan = FilterPassPlan::default();
+        plan.init([op], SizeU16::new(512));
+        plan.steps()
+            .flatten()
+            .map(|pass| pass.filter_pass_kind)
+            .collect()
+    }
+
+    #[test]
+    fn zero_axis_emits_no_orthogonal_resampling_or_blur() {
+        for (sigma, forbidden) in [
+            (
+                [12.0, 0.0],
+                [
+                    pass_kind::DOWNSCALE_Y,
+                    pass_kind::UPSCALE_Y,
+                    pass_kind::BLUR_V,
+                ],
+            ),
+            (
+                [0.0, 12.0],
+                [
+                    pass_kind::DOWNSCALE_X,
+                    pass_kind::UPSCALE_X,
+                    pass_kind::BLUR_H,
+                ],
+            ),
+        ] {
+            let steps = plan(sigma, true);
+            assert!(!steps.is_empty());
+            assert!(steps.iter().all(|kind| !forbidden.contains(kind)));
+        }
+        assert!(plan([0.0, 0.0], true).is_empty());
+    }
+
+    /// Each axis runs on its own, the x-axis first, inside the colour space conversions.
+    #[test]
+    fn axes_run_one_after_the_other_in_linear_light() {
+        assert_eq!(
+            plan([3.0, 8.0], true),
+            [
+                pass_kind::DECODE_LINEAR,
+                pass_kind::DOWNSCALE_X,
+                pass_kind::BLUR_H,
+                pass_kind::UPSCALE_X,
+                pass_kind::DOWNSCALE_Y,
+                pass_kind::DOWNSCALE_Y,
+                pass_kind::BLUR_V,
+                pass_kind::UPSCALE_Y,
+                pass_kind::UPSCALE_Y,
+                pass_kind::ENCODE_SRGB,
+            ]
+        );
+        assert_eq!(
+            plan([1.0, 0.0], false),
+            [pass_kind::BLUR_H, pass_kind::COPY]
+        );
     }
 }

@@ -11,6 +11,8 @@ use crate::filter::drop_shadow::{DropShadow, transform_shadow_params};
 use crate::filter::flood::Flood;
 use crate::filter::gaussian_blur::{GaussianBlur, transform_blur_params};
 use crate::filter::offset::Offset;
+#[cfg(feature = "ahcut")]
+use crate::filter_effects::EdgeMode;
 use crate::filter_effects::{Filter, FilterPrimitive};
 use crate::geometry::{PaddingU16, RectU16};
 use crate::kurbo::{Affine, Rect, Vec2};
@@ -21,6 +23,7 @@ use crate::util::RectExt;
 pub mod drop_shadow;
 pub mod flood;
 pub mod gaussian_blur;
+pub mod gaussian_xy;
 pub mod offset;
 
 /// A filter that has been prepared for rendering.
@@ -97,6 +100,13 @@ impl PreparedFilter {
                 let offset = Offset::new(scaled_dx, scaled_dy);
 
                 Self::Offset(offset)
+            }
+            // This enum has no kind for the colour space: a renderer that blurs in linear light takes the blur
+            // from `PreparedGaussianXY::from_filter` first. Anything else gets the same axis blur in encoded sRGB.
+            #[cfg(feature = "ahcut")]
+            FilterPrimitive::GaussianBlurXY { std_deviation, .. } => {
+                let device = gaussian_xy::transform_sigma_axis_aligned(*std_deviation, transform);
+                Self::GaussianBlur(GaussianBlur::new(device[0], device[1], EdgeMode::None))
             }
             _ => {
                 // Other primitives like Blend, ColorMatrix, ComponentTransfer, etc.
