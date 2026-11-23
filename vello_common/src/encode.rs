@@ -959,6 +959,10 @@ impl EncodeExt for BlurredRoundedRectangle {
 
         // To avoid divide by 0; potentially should be a bigger number for antialiasing.
         let std_dev = self.std_dev.max(1e-6);
+        // The erf kernel's width is sqrt(2) times the Gaussian standard deviation.
+        // Its corner radii and eccentricity correction use that same width.
+        #[cfg(feature = "ahcut")]
+        let std_dev = std_dev * core::f32::consts::SQRT_2;
 
         let min_edge = width.min(height);
         let rmax = 0.5 * min_edge;
@@ -968,9 +972,6 @@ impl EncodeExt for BlurredRoundedRectangle {
         let exponent = 2.0 * r1 / r0;
 
         let std_dev_inv = std_dev.recip();
-        // The Gaussian CDF takes erf(distance / (sqrt(2) * sigma)).
-        #[cfg(feature = "ahcut")]
-        let std_dev_inv = std_dev_inv * core::f32::consts::FRAC_1_SQRT_2;
 
         // Pull in long end (make less eccentric).
         let delta = 1.25

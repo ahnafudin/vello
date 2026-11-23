@@ -1,8 +1,11 @@
 // Copyright 2026 the Vello Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Alpha across a straight edge of the blurred rectangle used for CSS box shadows.
+//! Pixel coverage of the blurred rectangles used for CSS box shadows.
 #![cfg(feature = "ahcut")]
+
+#[path = "box_shadow_profile/corners.rs"]
+mod corners;
 
 use core::f64::consts::{SQRT_2, TAU};
 use vello_cpu::color::palette::css;
@@ -12,14 +15,13 @@ use vello_cpu::{Pixmap, RenderContext, Resources};
 const EDGE: i32 = 96;
 const SIZE: u16 = 128;
 
-fn paint(sigma: f32, inset: bool) -> Pixmap {
-    let mut ctx = RenderContext::new(SIZE, SIZE);
+fn paint(size: (u16, u16), shadow: Rect, radius: f32, sigma: f32, inset: bool) -> Pixmap {
+    let (width, height) = size;
+    let mut ctx = RenderContext::new(width, height);
     ctx.set_paint(css::BLACK);
-    // A 64 px square offset by 24 px from (8, 8), leaving its far edges exposed.
-    let shadow = Rect::new(32.0, 32.0, f64::from(EDGE), f64::from(EDGE));
-    let area = Rect::new(0.0, 0.0, f64::from(SIZE), f64::from(SIZE)).to_path(0.1);
-    ctx.fill_blurred_rounded_rect_in(&area, &shadow, 0.0, sigma, inset);
-    let mut target = Pixmap::new(SIZE, SIZE);
+    let area = Rect::new(0.0, 0.0, f64::from(width), f64::from(height)).to_path(0.1);
+    ctx.fill_blurred_rounded_rect_in(&area, &shadow, radius, sigma, inset);
+    let mut target = Pixmap::new(width, height);
     ctx.flush();
     ctx.render(&mut target, &mut Resources::new());
     target
@@ -42,7 +44,7 @@ fn check_profile(raster: &Pixmap, radius: f64, inset: bool, vertical: bool) {
     let samples: Vec<_> = offsets
         .clone()
         .map(|offset| {
-            let at = (EDGE + offset) as usize;
+            let at = usize::try_from(EDGE + offset).unwrap();
             let (x, y) = if vertical { (64, at) } else { (at, 64) };
             let alpha = f64::from(raster.data()[y * usize::from(SIZE) + x].a) / 255.0;
             if inset { 1.0 - alpha } else { alpha }
@@ -50,7 +52,11 @@ fn check_profile(raster: &Pixmap, radius: f64, inset: bool, vertical: bool) {
         .collect();
     if radius == 0.0 {
         for (offset, &alpha) in offsets.zip(&samples) {
-            assert_eq!(alpha, if offset < 0 { 1.0 } else { 0.0 });
+            assert_eq!(
+                alpha,
+                if offset < 0 { 1.0 } else { 0.0 },
+                "pixel offset {offset}"
+            );
         }
         return;
     }
@@ -78,26 +84,28 @@ fn check_profile(raster: &Pixmap, radius: f64, inset: bool, vertical: bool) {
     );
 }
 
-fn check_css_radius(radius: f64) {
+fn check_css_radius(radius: u16) {
+    // A 64 px square offset by 24 px from (8, 8), leaving its far edges exposed.
+    let shadow = Rect::new(32.0, 32.0, f64::from(EDGE), f64::from(EDGE));
     for inset in [false, true] {
-        let raster = paint((radius / 2.0) as f32, inset);
+        let raster = paint((SIZE, SIZE), shadow, 0.0, f32::from(radius) / 2.0, inset);
         for vertical in [false, true] {
-            check_profile(&raster, radius, inset, vertical);
+            check_profile(&raster, f64::from(radius), inset, vertical);
         }
     }
 }
 
 #[test]
 fn zero_radius_has_a_sharp_edge() {
-    check_css_radius(0.0);
+    check_css_radius(0);
 }
 
 #[test]
 fn five_pixel_blur_matches_the_css_shadow_profile() {
-    check_css_radius(5.0);
+    check_css_radius(5);
 }
 
 #[test]
 fn six_pixel_blur_matches_the_css_shadow_profile() {
-    check_css_radius(6.0);
+    check_css_radius(6);
 }
