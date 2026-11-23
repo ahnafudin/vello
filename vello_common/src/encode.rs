@@ -968,6 +968,9 @@ impl EncodeExt for BlurredRoundedRectangle {
         let exponent = 2.0 * r1 / r0;
 
         let std_dev_inv = std_dev.recip();
+        // The Gaussian CDF takes erf(distance / (sqrt(2) * sigma)).
+        #[cfg(feature = "ahcut")]
+        let std_dev_inv = std_dev_inv * core::f32::consts::FRAC_1_SQRT_2;
 
         // Pull in long end (make less eccentric).
         let delta = 1.25

@@ -61,7 +61,7 @@ fn check_profile(raster: &Pixmap, radius: f64, inset: bool, vertical: bool) {
             .map(|(offset, &alpha)| (alpha - pixel_alpha(offset, trial)).powi(2))
             .sum::<f64>()
     };
-    // An unconstrained fit over 0.5 to 5 px, at 0.01 px resolution.
+    // Fit sigma over 0.5 to 5 px, at 0.01 px resolution.
     let fit = (50..=500)
         .map(|n| f64::from(n) / 100.0)
         .map(|trial| (trial, squared_error(trial)))
