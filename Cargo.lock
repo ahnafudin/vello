@@ -4663,6 +4663,7 @@ dependencies = [
  "fearless_simd_macros",
  "glifo",
  "hashbrown 0.17.1",
+ "libm",
  "ordered-channel",
  "png",
  "rayon",

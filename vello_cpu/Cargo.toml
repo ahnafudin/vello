@@ -30,11 +30,13 @@ rayon = { workspace = true, optional = true }
 thread_local = { workspace = true, optional = true }
 
 [dev-dependencies]
+libm = "0.2.16"
 fearless_simd = { workspace = true, features = ["force_support_fallback"] }
 
 [features]
 # If adding new features, also add to `src/lib.rs`
 default = ["std", "png", "text", "u8_pipeline"]
+ahcut = ["vello_common/ahcut"]
 # Get floating point functions from the standard library (likely using your target’s libc).
 std = ["vello_common/std", "glifo?/std"]
 # Use floating point implementations from libm.

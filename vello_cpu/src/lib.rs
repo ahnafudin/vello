@@ -73,6 +73,8 @@
 //!
 //! ## Features
 //!
+//! - `ahcut`: Enable the shared renderer corrections used by the native paint profile.
+//!
 //! - `std` (enabled by default): Get floating point functions from the standard
 //!   library (likely using your target's libc).
 //! - `libm`: Use floating point implementations from [libm][].
